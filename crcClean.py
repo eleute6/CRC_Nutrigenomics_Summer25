@@ -12,6 +12,7 @@ import argparse
 from pathlib import Path
 import pandas as pd
 import numpy as np
+from xml.etree import ElementTree as ET
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,24 +34,49 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_one_htseq(path: Path) -> pd.Series:
-    """Return a Series of raw counts indexed by gene ID."""
-    comp = "gzip" if path.suffix == ".gz" else "infer"
-    df = pd.read_csv(
-        path,
-        sep="\t",
-        header=None,
-        names=["gene_id", "count"],
-        compression=comp,
-        dtype={"gene_id": str, "count": "Int64"},
-    )
+def read_counts(path: Path) -> pd.Series:
+    """Return a Series of raw counts indexed by gene ID.
+
+    Supports plain text/TSV as well as simple XML files. The two-column
+    layout is assumed to be ``gene_id`` and ``count``; XML files are
+    parsed using :mod:`xml.etree.ElementTree` and the first two fields
+    are used.
+    """
+
+    suffixes = ''.join(path.suffixes).lower()
+    comp = 'gzip' if suffixes.endswith('.gz') else 'infer'
+
+    if suffixes.endswith(('.txt', '.txt.gz', '.tsv', '.tsv.gz', '.htseq.counts', '.htseq.counts.gz')):
+        df = pd.read_csv(
+            path,
+            sep='\t',
+            header=None,
+            names=['gene_id', 'count'],
+            compression=comp,
+            dtype={'gene_id': str, 'count': 'Int64'},
+        )
+    elif suffixes.endswith(('.xml', '.xml.gz')):
+        if comp == 'gzip':
+            import gzip
+            with gzip.open(path, 'rb') as f:
+                xml_root = ET.parse(f).getroot()
+        else:
+            xml_root = ET.parse(path).getroot()
+        records = []
+        for elem in xml_root:
+            values = [child.text for child in list(elem)[:2]]
+            records.append(values)
+        df = pd.DataFrame(records, columns=['gene_id', 'count'])
+    else:
+        raise ValueError(f"Unsupported file type: {path}")
+
     df = df[~df["gene_id"].str.startswith("__")]
     df["gene_id"] = df["gene_id"].str.split(".").str[0]
     return df.set_index("gene_id")["count"]
 
 
 def merge_counts(paths: list[Path]) -> pd.DataFrame:
-    counts = pd.concat([read_one_htseq(p) for p in paths], axis=1, sort=False)
+    counts = pd.concat([read_counts(p) for p in paths], axis=1, sort=False)
     counts.columns = [p.name.split(".")[0] for p in paths]
     return counts
 
@@ -70,7 +96,16 @@ def log2_cpm(counts: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     args = parse_args()
 
-    patterns = ["*.htseq.counts.gz", "*.htseq.counts"]
+    patterns = [
+        "*.htseq.counts",
+        "*.htseq.counts.gz",
+        "*.tsv",
+        "*.tsv.gz",
+        "*.txt",
+        "*.txt.gz",
+        "*.xml",
+        "*.xml.gz",
+    ]
     files: list[Path] = []
     for pat in patterns:
         files.extend(args.root.rglob(pat))
